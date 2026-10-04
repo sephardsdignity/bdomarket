@@ -893,13 +893,13 @@ class ArshaMarket(BaseMarket):
                        for j in range(i, min(i + chunk_size, end_id + 1))]
                 tasks.append(self.get_item(ids))
 
-        responses = await asyncio.gather(*tasks, return_exceptions=True)
+               responses = await asyncio.gather(*tasks, return_exceptions=True)
         for response in responses:
             if isinstance(response, ApiResponse) and response.success:
                 items.extend(response.content or [])
             else:
                 err_msg = response.message if isinstance(response, ApiResponse) else str(response)
-print(f"Error fetching items: {err_msg}")
+                print(f"Error fetching items: {err_msg}")
 
         return ApiResponse(
             content=json.loads(json.dumps(items, indent=2)),
