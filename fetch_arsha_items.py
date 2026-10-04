@@ -32,7 +32,7 @@ REGION       = "eu"
 API_VERSION  = "v2"
 LANG         = "en"
 
-MIN_GRADE    = 4          # keep items with grade > this value
+MIN_GRADE    = 3          # keep items with grade > this value
 BATCH_SIZE   = 300        # API maximum
 BATCH_DELAY  = 2.0        # seconds between sublist requests
 MAX_RETRIES  = 3          # per request
