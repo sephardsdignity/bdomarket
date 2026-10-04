@@ -898,8 +898,8 @@ class ArshaMarket(BaseMarket):
             if isinstance(response, ApiResponse) and response.success:
                 items.extend(response.content or [])
             else:
-                print(f"Error fetching items: {response.message if isinstance(
-                    response, ApiResponse) else str(response)}")
+                err_msg = response.message if isinstance(response, ApiResponse) else str(response)
+print(f"Error fetching items: {err_msg}")
 
         return ApiResponse(
             content=json.loads(json.dumps(items, indent=2)),
