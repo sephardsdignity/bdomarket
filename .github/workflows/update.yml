@@ -1,0 +1,65 @@
+name: Update Arsha Items
+
+on:
+  schedule:
+    # Runs every day at 05:00 UTC (07:00 CEST in summer)
+    - cron: '0 5 * * *'
+  workflow_dispatch: {}
+
+# Prevent overlapping runs if a previous one is still going
+concurrency:
+  group: arsha-items-update
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    name: Fetch Arsha item data
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Fetch Arsha item data
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: python fetch_arsha_items.py
+
+      - name: Show output summary
+        run: |
+          if [ -f arsha_items.json ]; then
+            echo "Output file exists."
+            ls -lh arsha_items.json
+            echo "---"
+            head -c 500 arsha_items.json
+          else
+            echo "ERROR: arsha_items.json was not created."
+            exit 1
+          fi
+
+      - name: Commit and push output
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add arsha_items.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Update arsha_items.json [$(date -u +%Y-%m-%dT%H:%M:%SZ)]"
+            git push
+          fi
