@@ -4,7 +4,7 @@ Fetch BDO market sublist data for all items with grade > 4.
 Runs entirely in GitHub Actions — no local PC required.
 
 Uses requests directly instead of the bdomarket library
-(the published PyPI version has a syntax error at line 901).
+(the published PyPI version has syntax errors incompatible with Python < 3.12).
 
 Output: arsha_items.json in the repository root.
 """
@@ -20,13 +20,13 @@ import requests
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
-s
+
 BASE_URL     = "https://api.arsha.io"
 REGION       = "eu"
 API_VERSION  = "v2"
 LANG         = "en"
 
-MIN_GRADE    = 3          # keep items with grade > this value
+MIN_GRADE    = 4          # keep items with grade > this value
 BATCH_SIZE   = 300        # API maximum
 BATCH_DELAY  = 2.0        # seconds between sublist requests
 MAX_RETRIES  = 3          # per batch
@@ -134,7 +134,6 @@ def fetch_sublist_batch(batch):
 
             print(f"  Attempt {attempt}: HTTP {response.status_code}")
             if response.status_code == 500:
-                # Imperva block — log a snippet for diagnosis
                 print(f"    Body: {response.text[:150]}")
 
         except Exception as e:
@@ -242,16 +241,16 @@ def main():
 
     # 5. Write output
     output = {
-        "updated":      datetime.now(timezone.utc).isoformat(),
-        "region":       REGION,
-        "api_version":  API_VERSION,
-        "min_grade":    MIN_GRADE,
-        "total_ids":    len(filtered),
-        "total_batches": total_batches,
+        "updated":        datetime.now(timezone.utc).isoformat(),
+        "region":         REGION,
+        "api_version":    API_VERSION,
+        "min_grade":      MIN_GRADE,
+        "total_ids":      len(filtered),
+        "total_batches":  total_batches,
         "failed_batches": failed_batches,
-        "total_rows":   len(all_rows),
-        "headers":      OUTPUT_HEADERS,
-        "rows":         all_rows
+        "total_rows":     len(all_rows),
+        "headers":        OUTPUT_HEADERS,
+        "rows":           all_rows
     }
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
@@ -262,7 +261,6 @@ def main():
     print(f"Failed batches: {failed_batches}")
     print("=" * 60)
 
-    # Exit non-zero if we got nothing useful
     if not all_rows:
         sys.exit(1)
 
