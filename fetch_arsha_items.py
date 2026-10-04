@@ -1,10 +1,13 @@
 """
-Fetch BDO market sublist data for all items with grade > 4.
+Fetch BDO market item details for all items with grade > 4.
 
-Runs entirely in GitHub Actions — no local PC required.
+Routes all Arsha API requests through the Cloudflare Worker to bypass
+Imperva's bot detection, which blocks GitHub Actions' Azure IPs.
 
-Uses requests directly instead of the bdomarket library
-(the published PyPI version has syntax errors incompatible with Python < 3.12).
+Endpoints used:
+  /v2/{region}/market       — full market list (to get all item IDs)
+  /v2/{region}/util/db      — item database (to get grades)
+  /v2/{region}/item?id=...  — detailed item data (10 attributes + name/sid)
 
 Output: arsha_items.json in the repository root.
 """
@@ -13,6 +16,7 @@ import json
 import sys
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 
 import requests
 
@@ -21,7 +25,9 @@ import requests
 # CONFIGURATION
 # ============================================================================
 
-BASE_URL     = "https://api.arsha.io"
+ARSHA_BASE_URL = "https://api.arsha.io"
+WORKER_URL     = "https://mute-leaf-03b0.sephard.workers.dev"
+
 REGION       = "eu"
 API_VERSION  = "v2"
 LANG         = "en"
@@ -29,16 +35,13 @@ LANG         = "en"
 MIN_GRADE    = 4          # keep items with grade > this value
 BATCH_SIZE   = 300        # API maximum
 BATCH_DELAY  = 2.0        # seconds between sublist requests
-MAX_RETRIES  = 3          # per batch
+MAX_RETRIES  = 3          # per request
 RETRY_DELAY  = 5.0        # seconds between retries
 
 OUTPUT_FILE  = "arsha_items.json"
 
-HTTP_HEADERS = {
-    "Content-Type": "application/json",
-    "User-Agent":   "BlackDesert"      # REQUIRED — bypasses Imperva
-}
-
+# The 10 required attributes from the item endpoint.
+# Extra fields returned by the API (name, sid) are ignored.
 OUTPUT_HEADERS = [
     "Id", "MinEnhance", "MaxEnhance", "BasePrice",
     "AmountListed", "TotalTrades", "PriceMin", "PriceMax",
@@ -47,20 +50,48 @@ OUTPUT_HEADERS = [
 
 
 # ============================================================================
-# HTTP HELPERS
+# WORKER-BASED HTTP CLIENT
 # ============================================================================
 
-def api_get(endpoint, params=None, timeout=60):
-    """GET request against the Arsha API with proper headers."""
-    url = f"{BASE_URL}/{endpoint}"
-    response = requests.get(
-        url,
-        params=params,
-        headers=HTTP_HEADERS,
-        timeout=timeout
-    )
-    response.raise_for_status()
-    return response.json()
+def arsha_request(endpoint, params=None, timeout=120):
+    """
+    Fetch an Arsha API endpoint via the Cloudflare Worker.
+
+    Uses POST with a JSON body so there is no URL-length limit.
+    Returns (status_code, parsed_json_or_none).
+    """
+    target = f"{ARSHA_BASE_URL}/{endpoint}"
+    if params:
+        target += "?" + urlencode(params)
+
+    payload = {"url": target}
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = requests.post(
+                WORKER_URL,
+                json=payload,
+                timeout=timeout
+            )
+
+            if response.status_code == 200:
+                try:
+                    return response.status_code, response.json()
+                except ValueError:
+                    print(f"  Worker returned non-JSON: {response.text[:200]}")
+                    return response.status_code, None
+
+            print(f"  Attempt {attempt}: Worker HTTP {response.status_code}")
+            if response.status_code == 500:
+                print(f"    Body: {response.text[:200]}")
+
+        except Exception as e:
+            print(f"  Attempt {attempt}: {e}")
+
+        if attempt < MAX_RETRIES:
+            time.sleep(RETRY_DELAY * attempt)
+
+    return None, None
 
 
 # ============================================================================
@@ -70,10 +101,14 @@ def api_get(endpoint, params=None, timeout=60):
 def fetch_market_list():
     """Returns a list of all item IDs currently on the market."""
     print("Fetching market list...")
-    data = api_get(
-        f"{API_VERSION}/{REGION}/GetWorldMarketList",
+    status, data = arsha_request(
+        f"{API_VERSION}/{REGION}/market",
         {"lang": LANG}
     )
+
+    if status != 200 or data is None:
+        print(f"  FAILED — status {status}")
+        return []
 
     ids = []
     if isinstance(data, list):
@@ -86,14 +121,17 @@ def fetch_market_list():
                     except (ValueError, TypeError):
                         pass
 
-    # Deduplicate, preserve order
     return list(dict.fromkeys(ids))
 
 
 def fetch_item_grades():
     """Returns dict {item_id: grade} from the Arsha item database."""
     print("Fetching item database...")
-    data = api_get("util/db", {"lang": LANG})
+    status, data = arsha_request("util/db", {"lang": LANG})
+
+    if status != 200 or data is None:
+        print(f"  FAILED — status {status}")
+        return {}
 
     grades = {}
     if isinstance(data, list):
@@ -112,45 +150,37 @@ def fetch_item_grades():
     return grades
 
 
-def fetch_sublist_batch(batch):
-    """Fetch one batch of sublist data. Returns parsed JSON or None on failure."""
+def fetch_items_batch(batch):
+    """
+    Fetch item details for one batch of IDs using the /item endpoint.
+
+    Returns parsed JSON (list of lists of dicts) or None on failure.
+    """
     ids_str = ",".join(str(i) for i in batch)
+    status, data = arsha_request(
+        f"{API_VERSION}/{REGION}/item",
+        {"id": ids_str, "lang": LANG}
+    )
 
-    endpoint = f"{API_VERSION}/{REGION}/GetWorldMarketSubList"
-    url      = f"{BASE_URL}/{endpoint}"
-    params   = {"id": ids_str, "lang": LANG}
+    if status != 200 or data is None:
+        return None
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = requests.get(
-                url,
-                params=params,
-                headers=HTTP_HEADERS,
-                timeout=60
-            )
-
-            if response.status_code == 200:
-                return response.json()
-
-            print(f"  Attempt {attempt}: HTTP {response.status_code}")
-            if response.status_code == 500:
-                print(f"    Body: {response.text[:150]}")
-
-        except Exception as e:
-            print(f"  Attempt {attempt}: exception — {e}")
-
-        if attempt < MAX_RETRIES:
-            time.sleep(RETRY_DELAY * attempt)
-
-    return None
+    return data
 
 
 # ============================================================================
 # PARSING
 # ============================================================================
 
-def parse_sublist(data):
-    """Parse GetWorldMarketSubList JSON into flat rows."""
+def parse_items(data):
+    """
+    Parse /item JSON into flat rows with exactly the 10 required columns.
+
+    The /item endpoint returns:
+      [[{...}, {...}], [{...}], ...]
+    Each inner list contains the enhancement brackets for one requested ID.
+    Extra fields (name, sid) are ignored.
+    """
     rows = []
 
     if not isinstance(data, list):
@@ -184,10 +214,12 @@ def parse_sublist(data):
 
 def main():
     print("=" * 60)
-    print("ARSHA ITEM FETCH — GitHub Actions")
+    print("ARSHA ITEM FETCH — GitHub Actions (via Cloudflare Worker)")
     print("=" * 60)
+    print(f"Worker:     {WORKER_URL}")
     print(f"Region:     {REGION}")
     print(f"API:        {API_VERSION}")
+    print(f"Endpoint:   /{API_VERSION}/{REGION}/item")
     print(f"Min grade:  > {MIN_GRADE}")
     print(f"Batch size: {BATCH_SIZE}")
     print("-" * 60)
@@ -196,7 +228,7 @@ def main():
     market_ids = fetch_market_list()
     print(f"Market items found: {len(market_ids)}")
     if not market_ids:
-        print("No market items — aborting.")
+        print("Aborting — no market items.")
         sys.exit(1)
 
     # 2. Grade database
@@ -207,10 +239,10 @@ def main():
     filtered = [i for i in market_ids if grades.get(i, 0) > MIN_GRADE]
     print(f"Items with grade > {MIN_GRADE}: {len(filtered)}")
     if not filtered:
-        print("No items passed the filter — aborting.")
+        print("Aborting — nothing passed the filter.")
         sys.exit(1)
 
-    # 4. Fetch sublists in batches
+    # 4. Fetch item details in batches
     total_batches = (len(filtered) + BATCH_SIZE - 1) // BATCH_SIZE
     print(f"Total batches: {total_batches}")
     print("-" * 60)
@@ -225,14 +257,14 @@ def main():
 
         print(f"Batch {b + 1}/{total_batches} ({len(batch)} IDs)...")
 
-        data = fetch_sublist_batch(batch)
+        data = fetch_items_batch(batch)
 
         if data is None:
             print(f"  FAILED after {MAX_RETRIES} retries.")
             failed_batches += 1
             continue
 
-        rows = parse_sublist(data)
+        rows = parse_items(data)
         print(f"  OK — {len(rows)} rows")
         all_rows.extend(rows)
 
@@ -244,6 +276,7 @@ def main():
         "updated":        datetime.now(timezone.utc).isoformat(),
         "region":         REGION,
         "api_version":    API_VERSION,
+        "endpoint":       f"/{API_VERSION}/{REGION}/item",
         "min_grade":      MIN_GRADE,
         "total_ids":      len(filtered),
         "total_batches":  total_batches,
